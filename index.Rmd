@@ -1,0 +1,842 @@
+---
+title: "A economia do chimarrão"
+author: "[Fernando da Silva](https://github.com/schoulten)^[Grupo de Estudos de Conjuntura Econômica - fernando@gecefurg.com.br]"
+date: "Atualizado em: `r format(Sys.time(), '%d de %B de %Y')`"
+output:
+  html_document:
+    css: style.css
+    theme: united
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: false
+    code_folding: hide
+    code_download: true
+bibliography: references.bib
+link-citations: true
+---
+
+
+
+# **Introdução** {-}
+
+Para aqueles que, como eu, são apaixonados por tomar chimarrão mas nunca tiveram a oportunidade de conhecer mais a fundo seus aspectos **econômicos**, neste artigo compartilho uma análise exploratória de dados dessa cultura e tradição regional, considerada como "o caminho da sustentabilidade" por alguns.
+
+Te aprochega, ceva teu mate e vem conhecer a economia do chimarrão!
+
+
+
+
+# **Pacotes necessários** {-}
+
+Utilizaremos a lingaguem `R` como ferramenta de trabalho, sendo necessário alguns pacotes para as análises, especificados abaixo. Você pode acompanhar e reproduzir todo o código, disponibilizado [aqui](https://github.com/schoulten/economia-chimarrao).
+
+```{r pacotes, message = FALSE}
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("knitr", "rmarkdown","sidrar","tidyverse", "magrittr", "scales", "DT", "geobr", "hablar", "zoo", "furrr", "rtemps", "janitor", "ComexstatR", "vroom", "deflateBR")
+
+```
+
+
+```{r configs, echo=F, warning= F, message=F}
+
+opts_chunk$set(message = FALSE, warning = FALSE, error = FALSE, tidy = FALSE, cache = FALSE, results = "asis")
+
+options(scipen = 999, OutDec = ",")
+
+```
+
+
+
+
+# **Dados** {-}
+
+Os dados são disponibilizados por duas principais fontes:
+
+1. **IBGE**: através da pesquisa anual sobre a **Produção Agrícola Municipal**, que investiga um conjunto de produtos das lavouras temporárias e permanentes do país que se caracterizam não só pela grande importância econômica que possuem na pauta de exportações, como também por sua relevância social, componentes que são da cesta básica do brasileiro, tendo como unidade de coleta o município. Também são apresentadas algumas informações interessantes provenientes do último **Censo Agropecuário**, além de dados do **IPCA**.
+
+2. **MDIC**: o Ministério da Indústria, Comércio Exterior e Serviços disponibiliza diversos dados desagregados sobre exportação e importação. Iremos focar nas exportações da Erva-Mate.
+
+
+::: {.info-box .important}
+
+**Alerta**: esse procedimento é demorado!
+
+:::
+
+
+```{r importacao}
+
+dados_gerais <- get_sidra(api = "/t/1613/n1/all/v/214,215,1000215/p/last%2020/c82/0,2717,2718,2719,2720,2721,2722,2723,2724,2725,2726,2727,2728,2729,2730,2731,2732,2733,2734,2735,2736,2737,2738,2739,2740,2741,2742,2743,2744,2745,2746,2747,2748,40472,40473,45981,90001/d/v1000215%202")
+
+
+
+dados_pib <- get_sidra(api = "/t/1846/n1/all/v/all/p/all/c11255/90687,90691,90696,90706,90707/d/v585%200")
+
+
+
+dados_censo <- get_sidra(api = "/t/6955/n1/all/v/all/p/all/c829/46302/c227/4948/c218/46502/c12517/113601/d/v9506%200,v9507%200,v10075%200,v10076%200,v10077%200,v10078%200,v10079%200,v10080%200,v10082%200,v10083%200")
+
+
+
+plan(multisession, workers = 4)
+
+dados_pam <- info_sidra(1613) %>%
+  
+  extract2(2) %>%
+
+  tibble(period = unlist(strsplit(., ", "))) %>%
+  
+  mutate(dados = future_map(period, ~get_sidra(1613,
+                                               variable  = c(216, 214, 112, 215),
+                                               period    = .x,
+                                               geo       = "City",
+                                               classific = c("C82"),
+                                               category  = list(2729),
+                                               header    = TRUE,
+                                               format    = 4),
+                            .progress = FALSE)
+         )
+
+
+
+dados_ipca <- get_sidra(api = "/t/7060/n1/all/v/63,69/p/all/c315/47631/d/v63%202,v69%202")
+
+
+
+dados_pop <- get_sidra(api = "/t/6579/n1/all/n3/all/v/all/p/all")
+
+
+
+dados_exp <- pesquisar_comex_stat(ano_inicial   = 1997,
+                                  ano_final     = format(Sys.Date(), format = "%Y"),
+                                  mes_inicial   = 1,
+                                  mes_final     = 12,
+                                  detalha_mes   = FALSE,
+                                  tipo_op       = "exp",
+                                  tipo_ord      = "det",
+                                  filtros       = c("cuciit"),
+                                  detalhamentos = c("cuciit"),
+                                  filtros_esp   = c("07431"))
+
+
+
+download.file(paste0("http://www.mdic.gov.br/balanca/bd/comexstat-bd/ncm/EXP_",
+                     format(Sys.Date(), format = "%Y"),
+                     ".csv"),
+              destfile = "./data/exportacao.csv",
+              mode = "wb")
+
+
+
+dados_exp_desag <- vroom("./data/exportacao.csv",
+                            col_select = -c(7:9),
+                            col_types = c(CO_NCM = "d", CO_PAIS = "d"))
+
+
+
+dados_exp_pais <- read.csv("http://www.mdic.gov.br/balanca/bd/tabelas/PAIS.csv", header = TRUE, sep = ";")
+
+```
+
+
+
+## **Tramento dos dados** {-}
+
+Procedimento de limpeza e tratamento de dados.
+
+```{r tratamento}
+
+geral <- dados_gerais %>%
+  
+  select(6, 8, 10, 12:13) %>%
+  
+  clean_names() %>%
+  
+  group_by(variavel, ano) %>%
+  
+  arrange(desc(valor))
+
+  
+
+
+pib_agro <- dados_pib %>%
+  
+  select(7, 10, 12:13) %>%
+  
+  filter(`Setores e subsetores` %in% c("PIB a preços de mercado", "Agropecuária - total")) %>%
+  
+  group_by(`Setores e subsetores`) %>%
+  
+  slice(tail(row_number(), 4)) %>%
+  
+  summarise(valor = sum(Valor)/1000) %>%
+  
+  mutate(participacao = round(valor[`Setores e subsetores` == "Agropecuária - total"] / valor[`Setores e subsetores` == "PIB a preços de mercado"] * 100, digits = 2))
+
+
+
+
+censo <- dados_censo %>%
+  
+  select(6,18:19)
+
+
+
+
+pam <- bind_rows(dados_pam$dados) %>%
+  
+  drop_na()
+
+
+
+
+pam_tab <- pam %>%
+  
+  select(4, 6, 8, 13) %>%
+
+  mutate(`Variável` = recode(`Variável`,
+                             "Área colhida"                 = "Área colhida (ha)",
+                             "Quantidade produzida"         = "Qtd. produzida (t)",
+                             "Rendimento médio da produção" = "Rendimento médio (kg/ha)",
+                             "Valor da produção"            = "Valor da produção (R$ mil)")) %>%
+  
+  pivot_wider(id_cols = 1:2, names_from = 3, values_from = 4) %>%
+  
+  group_by(`Ano`) %>%
+  
+  mutate(Ranking = row_number(max(`Qtd. produzida (t)`) - `Qtd. produzida (t)`), .before = 1) %>%
+  
+  arrange(Ranking) %>%
+  
+  ungroup()
+
+
+
+
+pam_tab_valor <- pam_tab %>%
+  
+  separate(`Município`, c("Município", "UF"), " - ") %>%
+  
+  group_by(UF, Ano) %>%
+  
+  summarise(valor = sum_(`Valor da produção (R$ mil)`, ignore_na = TRUE)) %>%
+  
+  arrange(desc(valor)) %>%
+  
+  mutate(estado     = recode(UF,
+                             "RS" = "Rio Grande do Sul",
+                             "SC" = "Santa Catarina",
+                             "PR" = "Paraná",
+                             "MS" = "Mato Grosso do Sul"),
+         Ano        = as.Date(paste0(Ano, "1201"), format = "%Y%m%d"),
+         valor_real = deflate(valor, Ano, format(max(Ano), format = "%m/%Y"), "igpdi"))
+
+
+
+
+pop <- dados_pop %>%
+  
+  select(4, 8, 11) %>%
+  
+  filter(`Brasil e Unidade da Federação` %in% pam_tab_valor$estado & Ano == dados_censo$Ano)
+
+
+
+
+prod <- pam_tab %>%
+  
+  filter(Ano == dados_censo$Ano) %>%
+  
+  separate(`Município`, c("Município", "UF"), " - ") %>%
+  
+  group_by(UF) %>%
+  
+  summarise(erva = sum_(`Qtd. produzida (t)`, ignore_na = TRUE)) %>%
+  
+  arrange(desc(erva)) %>%
+  
+  mutate(estado = recode(UF,
+                         "RS" = "Rio Grande do Sul",
+                         "SC" = "Santa Catarina",
+                         "PR" = "Paraná",
+                         "MS" = "Mato Grosso do Sul"))
+
+
+
+
+erva_pc <- left_join(prod, pop, by = c("estado" = "Brasil e Unidade da Federação")) %>%
+  
+  mutate(erva_pc = erva*1000 / Valor) %>%
+  
+  arrange(desc(erva))
+
+
+
+
+estados <- read_state(year = 2019, showProgress = FALSE)
+
+
+
+
+pam_map <- bind_rows(dados_pam$dados) %>%
+  
+  select(4, 6, 8, 13) %>%
+  
+  filter(Ano == "2019") %>%
+
+  mutate(`Variável` = recode(`Variável`,
+                             "Área colhida"                 = "Área colhida (ha)",
+                             "Quantidade produzida"         = "Qtd. produzida (t)",
+                             "Rendimento médio da produção" = "Rendimento médio (kg/ha)",
+                             "Valor da produção"            = "Valor da produção (R$ mil)")) %>%
+  
+  pivot_wider(id_cols = 1:2, names_from = 3, values_from = 4) %>%
+
+  separate(`Município`, c("Município", "UF"), " - ") %>%
+  
+  group_by(UF) %>%
+  
+  summarise(qtd = sum_(`Qtd. produzida (t)`, ignore_na = TRUE)) %>%
+  
+  left_join(estados, by = c("UF" = "abbrev_state"))  %>%
+  
+  filter(name_region %in% c("Sul", "Centro Oeste", "Sudeste"))
+
+
+
+
+pam_tab_evolucao <- pam_tab %>%
+  
+  drop_na() %>%
+  
+  group_by(`Ano`) %>%
+  
+  summarise(qtd_acum = (sum(`Qtd. produzida (t)`))) %>%
+  
+  ungroup() %>%
+  
+  mutate(yoy    = (qtd_acum/lag(qtd_acum)-1)*100,
+         cumsum = cumsum(replace_na(yoy, 0)),
+         mean   = mean(yoy, na.rm = TRUE),
+         mm2    = (rollmean(qtd_acum, 2, fill = "NA", align = "right") /
+                     rollmean(lag(qtd_acum, 2), 2, fill = "NA", align = "right")-1)*100)
+
+
+
+
+pam_tab_last_year <- pam_tab %>%
+  
+  filter(Ano == max(Ano)) %>% 
+  
+  mutate_at(4:7, ~label_number(big.mark = ".", decimal.mark = ",")(.)) %>%
+  
+  mutate(Ranking = paste0(Ranking, "\u00B0"))
+
+
+
+
+pam_tab_evolucao_prod <- pam_tab %>%
+  
+  drop_na() %>%
+  
+  group_by(`Ano`) %>%
+  
+  summarise(area_tot = sum(`Área colhida (ha)`),
+            qtd_tot  = sum(`Qtd. produzida (t)`),
+            prod_ano = qtd_tot/area_tot*1000) %>%
+  
+  ungroup() %>%
+  
+  mutate(mm2  = (rollmean(prod_ano, 2, fill = "NA", align = "right") /
+                   rollmean(lag(prod_ano, 2), 2, fill = "NA", align = "right")-1)*100,
+         yoy  = (prod_ano/lag(prod_ano)-1)*100,
+         mean = mean(yoy, na.rm = TRUE))
+
+
+
+
+pam_tab_estado <- pam_tab %>%
+  
+  filter(Ano == max(Ano)) %>%
+  
+  separate(`Município`, c("Município", "UF"), " - ") %>%
+  
+  group_by(UF) %>%
+  
+  summarise(qtd = sum_(`Qtd. produzida (t)`, ignore_na = TRUE)) %>%
+  
+  arrange(desc(qtd)) %>%
+  
+  mutate(estado = recode(UF,
+                         "RS" = "Rio Grande do Sul",
+                         "SC" = "Santa Catarina",
+                         "PR" = "Paraná",
+                         "MS" = "Mato Grosso do Sul"))
+
+
+
+
+exportacao <- dados_exp %>%
+  
+  mutate(coAno     = as.Date(paste0(coAno, "0101"), format = "%Y%m%d"),
+         vlFob     = as.numeric(vlFob),
+         kgLiquido = as.numeric(kgLiquido))
+
+
+
+
+exportacao_uf <- dados_exp_desag %>%
+  
+  filter(CO_NCM == "9030010") %>%
+  
+  left_join(dados_exp_pais, by = "CO_PAIS") %>%
+  
+  group_by(SG_UF_NCM) %>%
+  
+  summarise_at(vars(KG_LIQUIDO, VL_FOB), sum)
+
+
+
+
+exportacao_pais <- dados_exp_desag %>%
+  
+  filter(CO_NCM == "9030010") %>%
+  
+  left_join(dados_exp_pais, by = "CO_PAIS") %>%
+  
+  group_by(NO_PAIS) %>%
+  
+  summarise_at(vars(KG_LIQUIDO, VL_FOB), sum)
+
+
+
+
+ipca <- dados_ipca %>%
+  
+  select(6, 7, 13) %>%
+  
+  mutate(`Mês (Código)` = paste0(`Mês (Código)`, "01") %>% as.Date(format = "%Y%m%d")) %>%
+  
+  pivot_wider(id_cols = 2, names_from = `Variável`, values_from = Valor)
+
+```
+
+
+
+# **Análise** {-}
+
+
+### **Visão Geral** {-}
+
+Os dados mais recentes mostram que a Erva-Mate representa `r geral %>% ungroup %>% filter(ano == max(ano) & variavel == "Valor da produção - percentual do total geral" & produto_das_lavouras_permanentes == "Erva-mate (folha verde)") %>% pull(valor)`% do total do valor da produção em lavouras permanentes no Brasil no ano de `r geral %>% ungroup %>% filter(ano == max(ano) & variavel == "Valor da produção" & produto_das_lavouras_permanentes == "Total") %>% pull(ano)` (contra `r geral %>% ungroup %>% filter(ano == "2000" & variavel == "Valor da produção - percentual do total geral" & produto_das_lavouras_permanentes == "Erva-mate (folha verde)") %>% pull(valor)`% em 2000), totalizando R$ `r geral %>% ungroup %>% filter(ano == max(ano) & variavel == "Valor da produção" & produto_das_lavouras_permanentes == "Erva-mate (folha verde)") %>% mutate(valor = format(valor, big.mark = ",")) %>% pull(valor)` milhões gerados com a produção da planta. No mesmo segmento produtivo, o `r geral %>% ungroup %>% filter(ano == max(ano) & variavel == "Valor da produção - percentual do total geral" & !produto_das_lavouras_permanentes == "Total") %>% arrange(desc(valor)) %>% head(., 1) %>% pull(produto_das_lavouras_permanentes) %>% word(., 1) %>% tolower()` é o produto com maior predominância (`r geral %>% ungroup %>% filter(ano == max(ano) & variavel == "Valor da produção - percentual do total geral" & !produto_das_lavouras_permanentes == "Total") %>% arrange(desc(valor)) %>% head(., 1) %>% pull(valor)`%) nas lavouras brasileiras.
+
+Vale destacar que o setor agropecuário como um todo representa cerca de `r pib_agro %>% head(., 1) %>% pull(participacao)`% do PIB brasileiro ou, em termos monetários, um montante de R$ `r pib_agro %>% head(., 1) %>% pull(valor)` bilhões (últimos 4 trimestres acumulados).
+
+De acordo com o Censo Agropecuário (IBGE), a cultura da Erva-Mate envole ao menos `r format(censo[1,3], big.mark = ".")` estabelecimentos agropecuários (50+ pés), que produziram cerca de `r format(censo[2,3], big.mark = ".")` toneladas da planta em `r dados_censo$Ano %>% tail(., 1)`. Em termos de vendas, este ramo mercadológico converteu essa produção em cerca de R$ `r format(censo[5,3], big.mark = ",")` milhões (`r format(censo[3,3], big.mark = ".")` toneladas de Erva-Mate vendidas). Nesse período, os estabelecimento agropecuários colheram cerca de `r format(censo[7,3], big.mark = ".")` hectares de produção, com um total de `r format(censo[6,3], big.mark = ",")` milhões de pés da planta. Já o número de estabelecimentos com menos de 50 pés de produção de Erva-Mate totalizam `r format(censo[10,3], big.mark = ".")` estabelecimentos agropecuários.
+
+Se formos realizar um exercício simplório para tornar esses números mais palpáveis, podemos concluir que a produção *per capita* de Erva-Mate, ou seja, o total de toneladas produzidas pela população estimada, no estado do  `r head(erva_pc, 1) %>% pull(estado)` foi de `r head(erva_pc, 1) %>% select(erva_pc) %>% round(., digits = 2) %>% pull(erva_pc)` kg por pessoa.
+
+Agora vamos dar uma olhada mais aprofundada nesses dados.
+
+
+### **Produção** {-}
+
+
+#### **Quantidade produzida (t)** {-}
+
+A produção de Erva-Mate se restringe a região centro-sul do Brasil, sendo o maior produtor o estado do `r head(pam_tab_estado, 1) %>% pull(estado)`, que em `r tail(pam_tab %>% filter(Ano == max(Ano)), 1) %>% pull(Ano)` produziu `r format(head(pam_tab_estado, 1) %>% pull(qtd), big.mark = ".")` toneladas.
+
+
+
+
+```{r analise-producao}
+
+pam_map_ano <- dados_pam$period %>%
+  
+  tail(1) %>%
+  
+  paste0("Ano: ", .)
+
+
+
+ggplot(pam_map) +
+  
+  geom_sf(aes(fill = desc(-qtd), geometry = geom), color = NA, size = .01) +
+  
+  labs(title    = "Erva-Mate: quantidade produzida (t)",
+       subtitle = pam_map_ano, 
+       caption  = "Fonte: Fernando da Silva com dados de PAM/IBGE.",
+       size     = 8,
+       color    = '') + 
+  
+  scale_fill_distiller(palette   = "Reds",
+                       name      = "Toneladas",
+                       na.value  = "gray90",
+                       direction = 1) +
+  
+  theme_minimal() +
+  
+  theme(axis.title        = element_blank(),
+        axis.text         = element_blank(),
+        axis.ticks        = element_blank(),
+        panel.grid.minor  = element_blank(),
+        panel.grid.major  = element_blank(),
+        plot.title        = element_text(color = "red4", size = 18, face = "bold"),
+        legend.position   = c(0.85,0.25))
+  
+
+```
+</br>
+
+
+
+#### **Crescimento da produção (%)** {-}
+
+No acumulado desde o início da série histórica do IBGE, a produção brasileira da planta se expandiu `r paste0(tail(pam_tab_evolucao, 1) %>% pull(cumsum) %>% round(., 2), "%")`, com crescimento médio de `r paste0(head(pam_tab_evolucao, 1) %>% pull(mean) %>% round(., 2), "%")` ao ano, fechando o ano de `r tail(pam_tab %>% filter(Ano == max(Ano)), 1) %>% pull(Ano)` com `r format(sum(pam_tab_estado$qtd), big.mark = ".")` toneladas produzidas.
+
+
+```{r evolucao}
+
+titulo <- theme(plot.title = element_text(color = "red4", size = 18, face = "bold"))
+
+
+pam_tab_evolucao %>%
+  
+  drop_na() %>%
+  
+  mutate(Ano = as.Date(Ano, format = "%Y")) %>%
+  
+  ggplot() +
+  
+  geom_line(mapping = aes(y = mm2, x = Ano), color = "red4", size = 1.5) +
+  
+  labs(title    = "Erva-Mate: Taxa de crescimento da produção (t)",
+       subtitle = "Média móvel de 2 anos, em %",
+       caption  = "Fonte: Fernando da Silva com dados de PAM/IBGE.",
+       x        = "",
+       y        = "%") +
+  
+  theme_minimal() +
+  
+  titulo
+
+```
+</br>
+
+
+
+#### **Ranking municipal** {-}
+
+No total, `r pam_tab_last_year %>% nrow()` municípios brasileiros produziram Erva-Mate em `r tail(pam_tab %>% filter(Ano == max(Ano)), 1) %>% pull(Ano)`. Destacamos abaixo algumas informações desses municípios, em ordem de maior produção (t). Você pode pesquisar se a cidade em que moras/nasceu está listada.
+
+
+```{r ranking}
+
+datatable(pam_tab_last_year, options = list(pageLength = 3), rownames = FALSE)
+
+```
+</br>
+
+
+
+#### **Produtividade (kg/ha)** {-}
+
+Em termos de rendimento médio da produção em relação à área colhida (kg/ha), no ano de `r tail(pam_tab %>% filter(Ano == max(Ano)), 1) %>% pull(Ano)` a cultura da Erva-Mate registrou uma produtividade média de `r pam_tab %>% filter(Ano == max(Ano)) %>% rename_at(6, ~"prod") %>% summarise(prod = mean(prod)) %>% pull(prod) %>% round(., 2) %>% format(., big.mark = ".", decimal.mark = ",")` (kg/ha). Analisando o período completo, a produtividade variou `r round(tail(pam_tab_evolucao_prod$mean, 1), 2)`%, em média.
+
+
+```{r produtividade}
+
+pam_tab_evolucao_prod %>%
+  
+  drop_na() %>%
+  
+  mutate(Ano = as.Date(Ano, format = "%Y")) %>%
+  
+  ggplot() +
+  
+  geom_area(mapping = aes(y = prod_ano, x = Ano), fill = "red4") +
+  
+  labs(title    = "Erva-Mate: Rendimento médio anual",
+       subtitle = "Em kg/ha",
+       caption  = "Fonte: Fernando da Silva com dados de PAM/IBGE.",
+       x        = "",
+       y        = "kg/ha") +
+  
+  theme_minimal() +
+  
+  titulo +
+  
+  scale_y_continuous(labels = function(x) comma(x, big.mark = "."))
+
+```
+</br>
+
+
+
+#### **Valor da produção (R$)** {-}
+
+O valor da produção de Erva-Mate totalizou R$ `r pam_tab_valor %>% ungroup() %>% filter(Ano == max(Ano)) %>% summarise(total = sum(valor)) %>% pull(total) %>% format(., big.mark = ",")` milhões no ano de `r tail(pam_tab %>% filter(Ano == max(Ano)), 1) %>% pull(Ano)`. O comportamento do valor, deflacionado pelo IGP-DI, pode ser observado no gráfico abaixo desagregado por estados.
+
+
+
+```{r valor}
+
+pam_tab_valor %>%
+  
+  drop_na() %>%
+  
+  filter(Ano >= "1995-12-01" & !UF == "MT") %>%
+
+  ggplot(aes(y = valor_real/1000, x = Ano, fill = estado)) +
+  
+  geom_area(position = "stack", stat = "identity", colour = "darkred") +
+  
+  labs(title    = "Erva-Mate: Valor da produção",
+       subtitle = paste0("Em R$ milhões, deflacionados pelo IGP-DI a valores de ", format(max(pam_tab_valor$Ano), format = "%Y")),
+       caption  = "Fonte: Fernando da Silva com dados de PAM/IBGE.",
+       x        = "",
+       y        = "R$ milhões") +
+  
+  theme_minimal() +
+  
+  titulo +
+  
+  theme(legend.position = "bottom",
+        legend.box      = "horizontal") +
+  
+  scale_fill_brewer(palette = "Reds", name = "", na.value = "gray90", direction = 1) +
+  
+  scale_y_continuous(labels = function(x) comma(x, big.mark = "."))
+
+```
+</br>
+
+
+
+### **Exportação** {-}
+
+A Erva-Mate é um produto que vem conquistando espaço em outros países. Do ano 1997 para cá, a exportação líquida da erva cancheada cresceu `r exportacao %>% arrange(coAno) %>% mutate(yoy = (kgLiquido/lag(kgLiquido)-1)*100, cumsum = cumsum(replace_na(yoy, 0)) %>% round(., digits = 2)) %>% slice_tail(n = 1) %>% pull(cumsum)`%, sendo que o principal destino é a `r exportacao_pais %>% arrange(desc(KG_LIQUIDO)) %>% slice(1) %>% pull(NO_PAIS)`.
+
+
+#### **Nível nacional** {-}
+
+
+```{r exportacao-nacional}
+
+exportacao %>%
+  
+  ggplot(aes(x = coAno)) +
+  
+  geom_line(mapping = aes(y = vlFob/1000000), size = 1.5, color = "red4") +
+  
+  labs(title    = "Erva-Mate: Exportações (US$)",
+       subtitle = "Em valor FOB (US$ milhões), acumulado no ano, a nível Brasil",
+       caption  = "Fonte: Fernando da Silva com dados de MDIC.",
+       x        = "",
+       y        = "Valor FOB (US$)") +
+  
+  theme_minimal() +
+  
+  titulo +
+  
+  scale_y_continuous(breaks       = extended_breaks(6),
+                     minor_breaks = FALSE)
+
+
+
+exportacao %>%
+  
+  ggplot(aes(x = coAno)) +
+  
+  geom_bar(mapping = aes(y = kgLiquido/1000), stat = "identity", fill = "red4") +
+  
+  labs(title    = "Erva-Mate: Exportações (t)",
+       subtitle = "Em toneladas líquidas, acumulado no ano, a nível Brasil",
+       caption  = "Fonte: Fernando da Silva com dados de MDIC.",
+       x        = "",
+       y        = "Toneladas líquidas") +
+  
+  theme_minimal() +
+  
+  titulo +
+  
+  scale_y_continuous(breaks       = extended_breaks(8),
+                     minor_breaks = FALSE,
+                     labels       = function(x) comma(x, big.mark = "."))
+
+```
+</br>
+</br>
+
+
+
+#### **Exportação por UF** {-}
+
+
+```{r exportacao-uf}
+
+
+exp_sub <- dados_exp_desag %>%
+  
+  filter(CO_NCM == "9030010" & CO_ANO == max(CO_ANO) & CO_MES == max(CO_MES)) %>%
+  
+  slice(1) %>%
+  
+  mutate(periodo = as.Date(paste0(CO_ANO, CO_MES, "01"), format = "%Y%m%d") %>% format(format = "%b/%Y")) %>%
+  
+  pull(periodo)
+
+
+
+exportacao_uf %>%
+  
+  filter(KG_LIQUIDO >= 1000) %>%
+  
+  ggplot(aes(x = KG_LIQUIDO/1000)) +
+  
+  geom_bar(mapping = aes(y = SG_UF_NCM), stat = "identity", fill = "red4") + 
+  
+  geom_text(aes(y        = SG_UF_NCM,
+                label    = comma(KG_LIQUIDO/1000, accuracy = 1, big.mark = "."),
+                fontface = "bold"),
+            hjust = -0.05,
+            size  = 5,
+            color = "red4") +
+  
+  labs(title    = "Erva-Mate: Exportações por UF de origem (t)",
+       subtitle = paste0("UFs com 1+ tonelada exportada, mate cancheado (NCM 9030010), acumulado até ", exp_sub),
+       caption  = "Fonte: Fernando da Silva com dados de MDIC.",
+       x        = "Toneladas líquidas",
+       y        = "") +
+  
+  theme_minimal() +
+  
+  titulo +
+  
+  scale_x_continuous(minor_breaks = FALSE,
+                     labels       = function(x) comma(x, big.mark = "."),
+                     expand       = expansion(mult = c(.01, .1)))
+
+
+
+exportacao_uf %>%
+  
+  filter(KG_LIQUIDO >= 1000) %>%
+  
+  ggplot(aes(x = VL_FOB/1000000)) +
+  
+  geom_bar(mapping = aes(y = SG_UF_NCM), stat = "identity", fill = "red4") + 
+  
+  geom_text(aes(y        = SG_UF_NCM,
+                label    = comma(VL_FOB/1000000, accuracy = 0.01, big.mark = ",", decimal.mark = ","),
+                fontface = "bold"),
+            hjust = -0.05,
+            size  = 5,
+            color = "red4") +
+  
+  labs(title    = "Erva-Mate: Exportações por UF de origem (US$)",
+       subtitle = paste0("UFs com 1+ tonelada exportada, mate cancheado (NCM 9030010), acumulado até ", exp_sub),
+       caption  = "Fonte: Fernando da Silva com dados de MDIC.",
+       x        = "Valor FOB (US$ milhões)",
+       y        = "") +
+  
+  theme_minimal() +
+  
+  titulo +
+  
+  scale_x_continuous(minor_breaks = FALSE,
+                     labels       = function(x) comma(x, big.mark = ".", decimal.mark = ","),
+                     expand       = expansion(mult = c(.01, .1)))
+
+```
+</br>
+</br>
+
+
+
+#### **Destino das exportações `r paste0("(acumulado no ano até ", exp_sub, ")")`** {-}
+
+
+```{r exportacao-pais}
+
+exportacao_pais %>%
+
+  arrange(desc(KG_LIQUIDO)) %>%
+    
+  rename_all(~c("País", "Quilogramas líquidos (kg)", "Valor FOB (US$)")) %>%
+  
+  mutate(Ranking = row_number(max(`Quilogramas líquidos (kg)`) - `Quilogramas líquidos (kg)`) %>% paste0(., "\u00B0"),
+         .before = 1) %>%
+  
+  mutate_at(3:4, ~label_number(big.mark = ".", decimal.mark = ",")(.)) %>%
+  
+  datatable(options = list(pageLength = 3), rownames = FALSE)
+
+```
+</br>
+</br>
+
+
+
+### **Inflação** {-}
+
+Analisando o lado dos preços ao consumidor final, através dos dados do IBGE observa-se que a inflação acumulada no ano do item Erva-Mate variou em `r paste0(ipca %>% tail(., 1) %>% pull(3), "%")` até `r ipca %>% rename_at(1, ~"mes") %>% summarise(mes = last(mes)) %>% mutate(mes = format(mes, format = "%B de %Y")) %>% pull(mes)`. 
+
+
+```{r inflacao}
+
+ipca_sub <- ipca %>%
+  
+  tail(., 1) %>%
+  
+  mutate(`Mês (Código)` = paste0("Item chá mate (erva mate) na classificação do IBGE, atualizado até: ",
+                                 format(as.Date(`Mês (Código)`), format = "%b/%Y"))) %>%
+  
+  pull(`Mês (Código)`)
+
+
+
+ipca %>%
+  
+  drop_na() %>%
+  
+  ggplot(aes(x = `Mês (Código)`)) +
+  
+  geom_line(mapping = aes(y = `IPCA - Variação acumulada no ano`,
+                          color = "Variação acumulada no ano"),
+            size = 1.5) +
+  
+  geom_bar(mapping = aes(y = `IPCA - Variação mensal`, fill = "Variação mensal"), stat = "identity") +
+  
+  labs(title    = "Erva-Mate: Inflação de preços",
+       subtitle = ipca_sub,
+       caption  = "Fonte: Fernando da Silva com dados de IPCA/IBGE.",
+       x        = "",
+       y        = "%") +
+  
+  theme_minimal() +
+  
+  titulo +
+  
+  theme(legend.position = "bottom",
+        legend.box      = "horizontal") +
+  
+  scale_fill_manual(name = "", values = c("Variação mensal" = "red3")) +
+  
+  scale_color_manual(name = "", values = c("Variação acumulada no ano" = "red4")) +
+  
+  scale_x_date(date_breaks = "1 months", date_labels = "%b\n%Y", minor_breaks = NULL)
+
+```
+</br>
+
+
+
+# **Conclusão** {-}
+
+Esta breve análise trouxe dados interessantes sobre a cultura do chimarrão, e teve apenas o intuito de explorar e conhecer melhor alguns aspectos econômicos da Erva-Mate. Fique à vontade para reproduzir o código, dar feedbacks, comentários ou sugestões!
+
