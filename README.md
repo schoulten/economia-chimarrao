@@ -19,5 +19,5 @@ rmarkdown::render("index.Rmd")
 Autor
 ------
 
-[Fernando da Silva](fernando@gecefurg.com.br)
+Fernando da Silva - fernando@gecefurg.com.br
 
